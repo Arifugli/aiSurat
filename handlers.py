@@ -2,246 +2,196 @@ import os
 import asyncio
 import logging
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import storage
-import replicate_api
-from config import MIN_PHOTOS, MAX_PHOTOS, STYLES
+import faceswap_engine
+from config import TEMPLATES, TEMPLATES_DIR, TEMP_DIR, FREE_GENERATIONS
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Папка для временных фото
-PHOTOS_DIR = "temp_photos"
-os.makedirs(PHOTOS_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
 
 # ─── /start ──────────────────────────────────────────────────────────────────
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    user = storage.get_user(message.from_user.id)
     storage.set_state(message.from_user.id, "idle")
-
     await message.answer(
         "👋 Привет! Я создам для тебя ИИ-фотосессию в любом образе!\n\n"
         "✨ Как это работает:\n"
-        "1️⃣ Ты отправляешь мне 10–20 своих фото\n"
-        "2️⃣ Я обучаю персональную ИИ-модель (~20 мин)\n"
-        "3️⃣ Выбираешь стиль — и получаешь фотосессию!\n\n"
-        "📸 Нажми кнопку ниже, чтобы начать!",
-        reply_markup=_start_keyboard()
+        "1️⃣ Отправь своё чёткое фото (лицо хорошо видно)\n"
+        "2️⃣ Выбери стиль из меню\n"
+        "3️⃣ Получи готовое фото за 10–20 секунд! 🔥\n\n"
+        f"🎁 Первые {FREE_GENERATIONS} генерации — бесплатно!\n\n"
+        "📸 Нажми кнопку ниже чтобы начать:",
+        reply_markup=_start_kb()
     )
 
 
-def _start_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📸 Начать загрузку фото", callback_data="start_upload")
-    return builder.as_markup()
+def _start_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="📸 Загрузить своё фото", callback_data="upload_photo")
+    return b.as_markup()
 
 
-# ─── Начало загрузки фото ─────────────────────────────────────────────────────
+# ─── Загрузка фото ───────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "start_upload")
-async def start_upload(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    storage.set_state(user_id, "collecting_photos")
-    storage.get_user(user_id)["photos"] = []  # сброс
-
+@router.callback_query(F.data == "upload_photo")
+async def ask_for_photo(callback: CallbackQuery):
+    storage.set_state(callback.from_user.id, "waiting_photo")
     await callback.message.answer(
-        f"🖼 Отлично! Отправь мне от {MIN_PHOTOS} до {MAX_PHOTOS} своих фото.\n\n"
-        "📌 Советы для лучшего результата:\n"
-        "• Разные ракурсы (фас, профиль, полуоборот)\n"
-        "• Разное освещение\n"
-        "• Без других людей на фото\n"
-        "• Чёткие, не размытые снимки\n\n"
-        "Начинай отправлять! 👇"
+        "📸 Отправь своё фото!\n\n"
+        "💡 Советы:\n"
+        "• Лицо чётко видно, смотришь в камеру\n"
+        "• Хорошее освещение\n"
+        "• Без очков и масок\n"
+        "• Только ты на фото"
     )
     await callback.answer()
 
-
-# ─── Приём фото ──────────────────────────────────────────────────────────────
 
 @router.message(F.photo)
 async def handle_photo(message: Message, bot: Bot):
     user_id = message.from_user.id
-    user = storage.get_user(user_id)
 
-    if user["state"] != "collecting_photos":
-        await message.answer("Нажми /start чтобы начать заново.")
+    if storage.get_user(user_id)["state"] != "waiting_photo":
+        await message.answer("Сначала нажми «Загрузить своё фото» 👇", reply_markup=_start_kb())
         return
 
-    photos = storage.get_photos(user_id)
-
-    if len(photos) >= MAX_PHOTOS:
-        await message.answer(f"У тебя уже {MAX_PHOTOS} фото — этого достаточно! Нажми кнопку ниже.")
-        return
-
-    # Скачиваем фото (берём самое большое)
+    # Скачиваем фото
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
-    file_url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
+    url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
+    path = os.path.join(TEMP_DIR, f"{user_id}_face.jpg")
 
-    save_path = os.path.join(PHOTOS_DIR, f"{user_id}_{len(photos)+1}.jpg")
-    await replicate_api.download_photo(file_url, save_path)
-    storage.add_photo(user_id, save_path)
+    await faceswap_engine.download_photo(url, path)
+    storage.set_photo(user_id, path)
+    storage.set_state(user_id, "idle")
 
-    count = len(storage.get_photos(user_id))
-
-    if count < MIN_PHOTOS:
-        remaining = MIN_PHOTOS - count
-        await message.answer(f"✅ Фото {count} принято! Ещё {remaining} для начала обучения.")
-    elif count == MIN_PHOTOS:
-        await message.answer(
-            f"✅ {count} фото получено — минимум достигнут!\n"
-            f"Можешь отправить ещё до {MAX_PHOTOS} фото для лучшего результата, "
-            f"или сразу начать обучение 👇",
-            reply_markup=_train_keyboard()
-        )
-    elif count < MAX_PHOTOS:
-        await message.answer(
-            f"✅ Фото {count} принято! ({MAX_PHOTOS - count} ещё можно добавить)",
-            reply_markup=_train_keyboard()
-        )
-
-
-def _train_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🚀 Начать обучение модели!", callback_data="start_training")
-    return builder.as_markup()
-
-
-# ─── Запуск обучения ─────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "start_training")
-async def start_training(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    photos = storage.get_photos(user_id)
-
-    if len(photos) < MIN_PHOTOS:
-        await callback.answer(f"Нужно минимум {MIN_PHOTOS} фото!", show_alert=True)
-        return
-
-    await callback.message.answer(
-        "⏳ Начинаю обучение твоей персональной ИИ-модели...\n\n"
-        "🕐 Это займёт около 15–25 минут.\n"
-        "Я пришлю уведомление, как только всё будет готово!\n\n"
-        "Можешь пока закрыть чат — бот сам напишет тебе 😊"
+    await message.answer(
+        "✅ Фото принято! Выбери стиль фотосессии 👇",
+        reply_markup=_styles_kb()
     )
-    await callback.answer()
-
-    storage.set_state(user_id, "training")
-
-    # Упаковываем фото в ZIP
-    zip_path = os.path.join(PHOTOS_DIR, f"{user_id}_photos.zip")
-    replicate_api.create_zip_from_photos(photos, zip_path)
-
-    # Запускаем обучение в фоне
-    asyncio.create_task(_run_training(user_id, zip_path, bot))
-
-
-async def _run_training(user_id: int, zip_path: str, bot: Bot):
-    """Фоновая задача: обучение и уведомление"""
-    try:
-        training_id = await replicate_api.train_lora_model(zip_path, user_id)
-        storage.set_training_id(user_id, training_id)
-
-        # Ждём завершения (проверяем каждые 30 сек)
-        while True:
-            await asyncio.sleep(30)
-            status = await replicate_api.check_training_status(training_id)
-
-            if status["status"] == "succeeded":
-                model_url = status.get("model_url")
-                storage.set_model_url(user_id, model_url)
-
-                await bot.send_message(
-                    user_id,
-                    "🎉 Твоя персональная модель готова!\n\n"
-                    "Теперь выбери стиль фотосессии 👇",
-                    reply_markup=_styles_keyboard()
-                )
-                break
-
-            elif status["status"] == "failed":
-                storage.set_state(user_id, "idle")
-                await bot.send_message(
-                    user_id,
-                    "❌ Что-то пошло не так при обучении.\n"
-                    "Попробуй снова: /start"
-                )
-                break
-
-    except Exception as e:
-        logger.error(f"Training error for user {user_id}: {e}")
-        await bot.send_message(user_id, "❌ Ошибка. Попробуй снова: /start")
 
 
 # ─── Выбор стиля ─────────────────────────────────────────────────────────────
 
-def _styles_keyboard():
-    builder = InlineKeyboardBuilder()
-    for key, style in STYLES.items():
-        builder.button(text=style["name"], callback_data=f"style_{key}")
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-@router.message(Command("styles"))
-async def cmd_styles(message: Message):
-    user_id = message.from_user.id
-    if not storage.get_model_url(user_id):
-        await message.answer("Сначала нужно обучить модель. Нажми /start")
-        return
-    await message.answer("Выбери стиль фотосессии 👇", reply_markup=_styles_keyboard())
+def _styles_kb():
+    b = InlineKeyboardBuilder()
+    for key, name in TEMPLATES.items():
+        b.button(text=name, callback_data=f"style_{key}")
+    b.adjust(2)
+    return b.as_markup()
 
 
 @router.callback_query(F.data.startswith("style_"))
 async def handle_style(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     style_key = callback.data.replace("style_", "")
-    style = STYLES.get(style_key)
+    style_name = TEMPLATES.get(style_key)
 
-    if not style:
+    if not style_name:
         await callback.answer("Неизвестный стиль", show_alert=True)
         return
 
-    model_url = storage.get_model_url(user_id)
-    if not model_url:
-        await callback.answer("Модель ещё не готова!", show_alert=True)
+    user_photo = storage.get_photo(user_id)
+    if not user_photo:
+        await callback.message.answer("Сначала загрузи своё фото 👇", reply_markup=_start_kb())
+        await callback.answer()
+        return
+
+    # Проверка лимита
+    gens_used = storage.get_generations_used(user_id)
+    if gens_used >= FREE_GENERATIONS and not storage.is_paid(user_id):
+        await callback.message.answer(
+            f"🔒 Бесплатные генерации закончились ({FREE_GENERATIONS} шт.)\n\n"
+            "💳 Напиши /pay чтобы продолжить."
+        )
+        await callback.answer()
+        return
+
+    # Проверка шаблона
+    template_path = os.path.join(TEMPLATES_DIR, f"{style_key}.jpg")
+    if not os.path.exists(template_path):
+        await callback.answer(
+            f"⚠️ Шаблон «{style_name}» ещё не загружен!",
+            show_alert=True
+        )
         return
 
     await callback.message.answer(
-        f"🎨 Генерирую фото в стиле «{style['name']}»...\n"
-        "⏳ Подожди ~30 секунд"
+        f"🎨 Применяю стиль «{style_name}»...\n"
+        "⏳ Подожди 10–20 секунд ✨"
     )
     await callback.answer()
 
-    # Генерация в фоне
-    asyncio.create_task(_run_generation(user_id, model_url, style, bot))
+    asyncio.create_task(_run_swap(user_id, user_photo, template_path, style_name, bot))
 
 
-async def _run_generation(user_id: int, model_url: str, style: dict, bot: Bot):
-    """Фоновая задача: генерация фото"""
+async def _run_swap(user_id: int, user_photo: str, template_path: str, style_name: str, bot: Bot):
+    result_path = os.path.join(TEMP_DIR, f"{user_id}_result.jpg")
     try:
-        photo_urls = await replicate_api.generate_photo(model_url, style["prompt"])
+        await faceswap_engine.faceswap(user_photo, template_path, result_path)
+        storage.increment_generations(user_id)
 
-        await bot.send_message(user_id, f"✨ Готово! Вот твои фото в стиле «{style['name']}»:")
+        gens_used = storage.get_generations_used(user_id)
+        remaining = max(0, FREE_GENERATIONS - gens_used)
 
-        for url in photo_urls:
-            await bot.send_photo(user_id, url)
+        caption = f"✨ Готово! Стиль «{style_name}»"
+        if not storage.is_paid(user_id):
+            if remaining > 0:
+                caption += f"\n\n🎁 Осталось бесплатных: {remaining}"
+            else:
+                caption += "\n\n🔒 Бесплатные закончились. /pay для продолжения"
 
-        await bot.send_message(
-            user_id,
-            "Хочешь ещё стиль? 👇",
-            reply_markup=_styles_keyboard()
-        )
+        photo_file = FSInputFile(result_path)
+        await bot.send_photo(user_id, photo=photo_file, caption=caption)
 
+        if remaining > 0 or storage.is_paid(user_id):
+            await bot.send_message(user_id, "Хочешь другой стиль? 👇", reply_markup=_styles_kb())
+
+    except ValueError as e:
+        err = str(e)
+        if "не найдено" in err.lower() or "not found" in err.lower():
+            await bot.send_message(
+                user_id,
+                "😕 Не смог найти лицо на фото.\n"
+                "Попробуй загрузить другое фото — лицо должно быть чётким и хорошо освещённым.",
+                reply_markup=_start_kb()
+            )
+        else:
+            logger.error(f"Swap error for {user_id}: {e}")
+            await bot.send_message(user_id, "❌ Ошибка. Попробуй другой стиль.", reply_markup=_styles_kb())
     except Exception as e:
-        logger.error(f"Generation error for user {user_id}: {e}")
-        await bot.send_message(user_id, "❌ Ошибка генерации. Попробуй другой стиль.")
+        logger.error(f"Swap error for {user_id}: {e}")
+        await bot.send_message(user_id, "❌ Ошибка обработки. Попробуй ещё раз.", reply_markup=_styles_kb())
+
+
+# ─── /pay ────────────────────────────────────────────────────────────────────
+
+@router.message(Command("pay"))
+async def cmd_pay(message: Message):
+    await message.answer(
+        "💳 Тарифы:\n\n"
+        "⭐ Базовый — 20 генераций → 299₽\n"
+        "🔥 Про — 60 генераций → 699₽\n"
+        "👑 Безлимит — 150 генераций → 999₽\n\n"
+        "📩 Для оплаты напиши мне: @твой_юзернейм"
+    )
+
+
+# ─── /myphoto — сменить фото ─────────────────────────────────────────────────
+
+@router.message(Command("myphoto"))
+async def cmd_myphoto(message: Message):
+    storage.set_state(message.from_user.id, "waiting_photo")
+    await message.answer("📸 Отправь новое фото! Лицо должно быть чётким.")
 
 
 # ─── /reset ──────────────────────────────────────────────────────────────────
@@ -249,4 +199,4 @@ async def _run_generation(user_id: int, model_url: str, style: dict, bot: Bot):
 @router.message(Command("reset"))
 async def cmd_reset(message: Message):
     storage.reset_user(message.from_user.id)
-    await message.answer("♻️ Сброшено. Нажми /start чтобы начать заново.")
+    await message.answer("♻️ Сброшено! Нажми /start чтобы начать заново.")

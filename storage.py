@@ -1,19 +1,13 @@
-"""
-Простое хранилище состояний пользователей в памяти.
-В продакшене заменить на Redis или PostgreSQL.
-"""
-
-# Структура: { user_id: { "state": ..., "photos": [...], "training_id": ..., "model_url": ... } }
 users: dict = {}
 
 
 def get_user(user_id: int) -> dict:
     if user_id not in users:
         users[user_id] = {
-            "state": "idle",        # idle | collecting_photos | training | ready
-            "photos": [],           # список путей к фото
-            "training_id": None,    # ID тренировки на Replicate
-            "model_url": None,      # URL обученной модели
+            "state": "idle",
+            "photo_path": None,
+            "generations_used": 0,
+            "is_paid": False,
         }
     return users[user_id]
 
@@ -21,36 +15,28 @@ def get_user(user_id: int) -> dict:
 def set_state(user_id: int, state: str):
     get_user(user_id)["state"] = state
 
+def set_photo(user_id: int, path: str):
+    get_user(user_id)["photo_path"] = path
 
-def add_photo(user_id: int, photo_path: str):
-    get_user(user_id)["photos"].append(photo_path)
+def get_photo(user_id: int):
+    return get_user(user_id).get("photo_path")
 
+def increment_generations(user_id: int):
+    get_user(user_id)["generations_used"] += 1
 
-def get_photos(user_id: int) -> list:
-    return get_user(user_id)["photos"]
+def get_generations_used(user_id: int) -> int:
+    return get_user(user_id).get("generations_used", 0)
 
+def set_paid(user_id: int):
+    get_user(user_id)["is_paid"] = True
 
-def set_training_id(user_id: int, training_id: str):
-    get_user(user_id)["training_id"] = training_id
-
-
-def get_training_id(user_id: int) -> str | None:
-    return get_user(user_id).get("training_id")
-
-
-def set_model_url(user_id: int, model_url: str):
-    get_user(user_id)["model_url"] = model_url
-    get_user(user_id)["state"] = "ready"
-
-
-def get_model_url(user_id: int) -> str | None:
-    return get_user(user_id).get("model_url")
-
+def is_paid(user_id: int) -> bool:
+    return get_user(user_id).get("is_paid", False)
 
 def reset_user(user_id: int):
     users[user_id] = {
         "state": "idle",
-        "photos": [],
-        "training_id": None,
-        "model_url": None,
+        "photo_path": None,
+        "generations_used": 0,
+        "is_paid": False,
     }

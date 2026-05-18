@@ -1,6 +1,9 @@
 aiogram==3.7.0
-replicate==0.34.2
 python-dotenv
 aiohttp
 aiofiles
 pydantic
+insightface==0.7.3
+onnxruntime==1.16.3
+opencv-python-headless==4.8.1.78
+numpy==1.24.4
