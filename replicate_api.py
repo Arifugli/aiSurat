@@ -48,7 +48,7 @@ async def train_lora_model(zip_path: str, user_id: int) -> str:
                 "trigger_word": "TOK",  # ключевое слово для генерации
                 "learning_rate": 0.0004,
             },
-            destination=f"your-replicate-username/user-{user_id}-lora",
+            destination=f"arifugli/user-{user_id}-lora",
         )
 
     return training.id
